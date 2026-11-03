@@ -1,0 +1,139 @@
+---
+# Source: probe/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe
+
+---
+# Source: probe/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: probe
+data:
+  # Kafka client config: TLS to the broker + OAUTHBEARER using the SA token file.
+  # The Strimzi OAuth callback reads the bearer token from oauth.access.token.location,
+  # re-reading the file so rotated SA tokens keep working.
+  client.properties: |
+    # Encrypt the connection with TLS and authenticate the client via SASL.
+    security.protocol=SASL_SSL
+
+    # Use OAuth bearer tokens (a JWT) as the credential instead of username/password.
+    sasl.mechanism=OAUTHBEARER
+
+    # The broker's CA is supplied as a PEM file rather than a Java keystore.
+    ssl.truststore.type=PEM
+
+    # Path to that CA cert, used to verify the broker's server certificate.
+    ssl.truststore.location=/opt/kafka/ca/ca.crt
+
+    # Strimzi handler that obtains/refreshes the bearer token for each connection.
+    sasl.login.callback.handler.class=io.strimzi.kafka.oauth.client.JaasClientOauthLoginCallbackHandler
+
+    # Tell that handler to read the JWT from the projected ServiceAccount token file.
+    sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required oauth.access.token.location="/var/run/secrets/tokens/kafka-token" ;
+
+  run.sh: |
+    #!/bin/sh
+    set -eu
+    BS="kafka.mgmt.rezakara.demo:9094"
+    TOPIC="pingkafka"
+    GROUP="pingkafka"
+    CFG=/config/client.properties
+    echo "probe starting: bootstrap=$BS topic=$TOPIC sa=$(cat /var/run/secrets/tokens/kafka-token | cut -d. -f2 | base64 -d 2>/dev/null | grep -o '\"sub\":\"[^\"]*\"' || true)"
+
+    # Long-lived consumer in the background, wrapped in a restart loop so a transient
+    # failure (e.g. a broker rolling restart) doesn't kill it permanently. The consumer
+    # group tracks offsets, so it resumes where it left off. sed -u keeps output unbuffered.
+    (
+      while true; do
+        /opt/kafka/bin/kafka-console-consumer.sh \
+          --bootstrap-server "$BS" --topic "$TOPIC" \
+          --group "$GROUP" --consumer.config "$CFG" \
+          --property print.timestamp=true 2>&1 | sed -u 's/^/[consumed] /'
+        echo "[consumer exited — restarting in 5s]"
+        sleep 5
+      done
+    ) &
+    trap 'kill $! 2>/dev/null || true' EXIT INT TERM
+
+    # Producer loop in the foreground.
+    while true; do
+      MSG="hello from $HOSTNAME at $(date -u +%FT%TZ)"
+      echo "$MSG" | /opt/kafka/bin/kafka-console-producer.sh \
+        --bootstrap-server "$BS" --topic "$TOPIC" --producer.config "$CFG"
+      echo "[produced] $MSG"
+      sleep 20
+    done
+
+---
+# Source: probe/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: probe
+  labels:
+    app: probe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: probe
+  template:
+    metadata:
+      labels:
+        app: probe
+    spec:
+      serviceAccountName: probe
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          image: quay.io/strimzi/kafka:1.2.0-kafka-4.3.1
+          command: ["/bin/sh", "/config/run.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: cluster-ca
+              mountPath: /opt/kafka/ca
+              readOnly: true
+            - name: kafka-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: probe
+            defaultMode: 0555
+        - name: cluster-ca
+          secret:
+            secretName: root-ca
+            items:
+              - key: ca.crt
+                path: ca.crt
+        # Projected SA token: the credential the broker validates via the K8s OIDC/JWKS endpoint.
+        # Left at the default mode (0644): the token is owned by root but the image runs non-root,
+        # so a stricter 0600 would make it unreadable. Strimzi's "loose permissions" warning is
+        # benign here since a projected token is already isolated to this pod.
+        - name: kafka-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: kafka
+                  expirationSeconds: 3600
+                  path: kafka-token
