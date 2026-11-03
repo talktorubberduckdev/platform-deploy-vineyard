@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: pingkafka
-  namespace: pillow-factory
+  namespace: vineyard
 data:
   # Kafka client config: TLS to the broker + OAUTHBEARER using the SA token file.
   # The Strimzi OAuth callback reads the bearer token from oauth.access.token.location,
