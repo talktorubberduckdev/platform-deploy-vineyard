@@ -14,10 +14,10 @@
 
 | Environment | Hostname |
 |-------------|-----------|
-| DEV  | `*.vny.dev.rezakara.demo` |
-| TEST | `*.vny.test.rezakara.demo` |
-| PROD | `*.vny.prod.rezakara.demo` |
-| WL  | `*.vny.dev.rezakara.demo` |
+| DEV  | `*.vineyard.dev.rezakara.demo` |
+| TEST | `*.vineyard.test.rezakara.demo` |
+| PROD | `*.vineyard.prod.rezakara.demo` |
+| WL  | `*.vineyard.dev.rezakara.demo` |
 
 ---
 
